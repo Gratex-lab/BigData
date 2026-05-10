@@ -4,6 +4,7 @@
     -- Etap 1: filtrowanie i wybór kolumn pogodowych (10 kolumn, bez limitu rekordow)
     CREATE OR REPLACE VIEW `splendid-binder-280014.rolnicze.v_weather_daily_filtered` AS
     SELECT
+      stn,
       country,
       obs_date,
       year,
@@ -16,6 +17,7 @@
       visibility_miles
     FROM (
       SELECT
+        g.stn,
         s.country,
         DATE(CAST(g.year AS INT64), CAST(g.mo AS INT64), CAST(g.da AS INT64)) AS obs_date,
         CAST(g.year AS INT64) AS year,
@@ -39,31 +41,45 @@
     -- 1.4 + 1.5 + 1.6
     -- Etap 2: agregacja miesieczna + zmienne dodatkowe
     CREATE OR REPLACE VIEW `splendid-binder-280014.rolnicze.v_weather_monthly_agg` AS
+WITH station_stats AS (
     SELECT
       country,
+      stn,
       year,
       month,
-      AVG(avg_temp_c) AS mean_temp_c,
-      SUM(prcp_mm) AS total_prcp_mm,
-      MAX(max_temp_c) - MIN(min_temp_c) AS temp_amplitude_c,
-      COUNTIF(max_temp_c >= 30) AS hot_days_30c,
-      COUNTIF(min_temp_c <= 0) AS frost_days_0c
+      AVG(avg_temp_c) AS stn_avg_temp,
+      SUM(prcp_mm) AS stn_total_prcp,
+      MAX(max_temp_c) - MIN(min_temp_c) AS stn_amplitude,
+      COUNTIF(max_temp_c >= 30) AS stn_hot_days,
+      COUNTIF(min_temp_c <= 0) AS stn_frost_days
     FROM `splendid-binder-280014.rolnicze.v_weather_daily_filtered`
-    GROUP BY country, year, month;
+    GROUP BY country, stn, year, month
+)
+SELECT
+  country,
+  year,
+  month,
+  AVG(stn_avg_temp) AS mean_temp_c,
+  AVG(stn_total_prcp) AS total_prcp_mm,
+  AVG(stn_amplitude) AS temp_amplitude_c,
+  AVG(stn_hot_days) AS hot_days_30c, -- Tu powstaje średnia (np. 2.5 dnia)
+  AVG(stn_frost_days) AS frost_days_0c
+FROM station_stats
+GROUP BY country, year, month;
 
     -- 1.4 + 1.6 + 1.7
     -- Etap 3: agregacja roczna
-    CREATE OR REPLACE VIEW `splendid-binder-280014.rolnicze.v_weather_yearly_agg` AS
-    SELECT
-      country,
-      year,
-      AVG(mean_temp_c) AS yearly_mean_temp_c,
-      SUM(total_prcp_mm) AS yearly_total_prcp_mm,
-      AVG(temp_amplitude_c) AS yearly_avg_temp_amplitude_c,
-      SUM(hot_days_30c) AS yearly_hot_days_30c,
-      SUM(frost_days_0c) AS yearly_frost_days_0c
-    FROM `splendid-binder-280014.rolnicze.v_weather_monthly_agg`
-    GROUP BY country, year;
+  CREATE OR REPLACE VIEW `splendid-binder-280014.rolnicze.v_weather_yearly_agg` AS
+SELECT
+  country,
+  year,
+  ROUND(AVG(mean_temp_c), 2) AS yearly_mean_temp_c,
+  ROUND(SUM(total_prcp_mm), 2) AS yearly_total_prcp_mm, 
+  ROUND(AVG(temp_amplitude_c), 2) AS yearly_avg_temp_amplitude_c,
+  ROUND(SUM(hot_days_30c), 1) AS yearly_hot_days_30c, 
+  ROUND(SUM(frost_days_0c), 1) AS yearly_frost_days_0c
+FROM `splendid-binder-280014.rolnicze.v_weather_monthly_agg`
+GROUP BY country, year;
 
     -- 1.2 + 1.3 + 1.6
     -- Etap 4: filtrowanie danych rolniczych (Wheat Yield, 1961-1962, US/CA/UK/FR)
@@ -127,67 +143,10 @@
 -- ==============================
 -- CZESC 3
 -- ==============================
-
 -- 3.1 + 3.2 + 3.3
 -- Wariant A: roczny (1961-1962, US/CA/UK/FR)
+-- Ten wariant korzysta z widoków utworzonych w części 1: roczne agregaty i przefiltrowane dane rolnicze.
 CREATE OR REPLACE VIEW `splendid-binder-280014.rolnicze.v3_variant_a_final` AS
-WITH weather_base AS (
-  SELECT
-    s.country,
-    DATE(CAST(g.year AS INT64), CAST(g.mo AS INT64), CAST(g.da AS INT64)) AS obs_date,
-    CAST(g.year AS INT64) AS year,
-    CAST(g.mo AS INT64) AS month,
-    IF(CAST(g.temp AS FLOAT64) = 9999.9, NULL, (CAST(g.temp AS FLOAT64) - 32) * 5 / 9) AS avg_temp_c,
-    IF(CAST(g.max AS FLOAT64) = 9999.9, NULL, (CAST(g.max AS FLOAT64) - 32) * 5 / 9) AS max_temp_c,
-    IF(CAST(g.min AS FLOAT64) = 9999.9, NULL, (CAST(g.min AS FLOAT64) - 32) * 5 / 9) AS min_temp_c,
-    IF(CAST(g.prcp AS FLOAT64) = 99.99, NULL, CAST(g.prcp AS FLOAT64) * 25.4) AS prcp_mm
-  FROM (
-    SELECT * FROM `bigquery-public-data.noaa_gsod.gsod1961`
-    UNION ALL
-    SELECT * FROM `bigquery-public-data.noaa_gsod.gsod1962`
-  ) g
-  JOIN `bigquery-public-data.noaa_gsod.stations` s
-    ON g.stn = s.usaf AND g.wban = s.wban
-  WHERE s.country IN ('US', 'CA', 'UK', 'FR')
-), weather_monthly AS (
-  SELECT
-    country,
-    year,
-    month,
-    AVG(avg_temp_c) AS mean_temp_c,
-    SUM(prcp_mm) AS total_prcp_mm,
-    MAX(max_temp_c) - MIN(min_temp_c) AS temp_amplitude_c,
-    COUNTIF(max_temp_c >= 30) AS hot_days_30c,
-    COUNTIF(min_temp_c <= 0) AS frost_days_0c
-  FROM weather_base
-  GROUP BY country, year, month
-), weather_yearly AS (
-  SELECT
-    country,
-    year,
-    AVG(mean_temp_c) AS yearly_mean_temp_c,
-    SUM(total_prcp_mm) AS yearly_total_prcp_mm,
-    AVG(temp_amplitude_c) AS yearly_avg_temp_amplitude_c,
-    SUM(hot_days_30c) AS yearly_hot_days_30c,
-    SUM(frost_days_0c) AS yearly_frost_days_0c
-  FROM weather_monthly
-  GROUP BY country, year
-), agri_base AS (
-  SELECT
-    CASE
-      WHEN UPPER(Area) IN ('UNITED STATES OF AMERICA', 'UNITED STATES', 'USA') THEN 'US'
-      WHEN UPPER(Area) = 'CANADA' THEN 'CA'
-      WHEN UPPER(Area) IN ('UNITED KINGDOM', 'GREAT BRITAIN', 'UK') THEN 'UK'
-      WHEN UPPER(Area) = 'FRANCE' THEN 'FR'
-      ELSE NULL
-    END AS country,
-    CAST(Year AS INT64) AS year,
-    Value AS agri_value
-  FROM `splendid-binder-280014.rolnicze.rolnicze`
-  WHERE CAST(Year AS INT64) BETWEEN 1961 AND 1962
-    AND Item = 'Wheat'
-    AND Element = 'Yield'
-)
 SELECT
   w.country,
   w.year,
@@ -197,71 +156,48 @@ SELECT
   w.yearly_hot_days_30c,
   w.yearly_frost_days_0c,
   a.agri_value
-FROM weather_yearly w
-LEFT JOIN agri_base a
+FROM `splendid-binder-280014.rolnicze.v_weather_yearly_agg` w
+LEFT JOIN `splendid-binder-280014.rolnicze.v_agri_filtered` a
   ON w.country = a.country AND w.year = a.year;
 
 -- 3.3
--- (Wariant A)
+-- (Wariant A) miesięczny widok — używa wcześniej zdefiniowanej agregacji miesięcznej
 CREATE OR REPLACE VIEW `splendid-binder-280014.rolnicze.v3_variant_a_weather_monthly` AS
 SELECT
   country,
   year,
   month,
-  AVG(avg_temp_c) AS mean_temp_c,
-  SUM(prcp_mm) AS total_prcp_mm
-FROM `splendid-binder-280014.rolnicze.v_weather_daily_filtered`
-GROUP BY country, year, month;
+  mean_temp_c,
+  total_prcp_mm,
+  temp_amplitude_c,
+  hot_days_30c,
+  frost_days_0c
+FROM `splendid-binder-280014.rolnicze.v_weather_monthly_agg`;
 
 -- 3.4
--- Wariant B: miesięczny (1962, US/FR), inny zakres + inny poziom agregacji
+-- Wariant B: miesięczny (1962, US/FR) — mniejszy zakres i dodatkowe zmienne statystyczne
 CREATE OR REPLACE VIEW `splendid-binder-280014.rolnicze.v3_variant_b_final` AS
-WITH weather_base AS (
-  SELECT
-    s.country,
-    CAST(g.year AS INT64) AS year,
-    CAST(g.mo AS INT64) AS month,
-    IF(CAST(g.temp AS FLOAT64) = 9999.9, NULL, (CAST(g.temp AS FLOAT64) - 32) * 5 / 9) AS avg_temp_c,
-    IF(CAST(g.prcp AS FLOAT64) = 99.99, NULL, CAST(g.prcp AS FLOAT64) * 25.4) AS prcp_mm
-  FROM `bigquery-public-data.noaa_gsod.gsod1962` g
-  JOIN `bigquery-public-data.noaa_gsod.stations` s
-    ON g.stn = s.usaf AND g.wban = s.wban
-  WHERE s.country IN ('US', 'FR')
-), weather_monthly AS (
+SELECT
+  m.country,
+  m.year,
+  m.month,
+  m.mean_temp_c,
+  m.total_prcp_mm,
+  m.temp_stddev_c,
+  a.agri_value
+FROM (
   SELECT
     country,
     year,
     month,
-    AVG(avg_temp_c) AS mean_temp_c,
-    SUM(prcp_mm) AS total_prcp_mm,
-    STDDEV_POP(avg_temp_c) AS temp_stddev_c
-  FROM weather_base
-  GROUP BY country, year, month
-), agri_yearly AS (
-  SELECT
-    CASE
-      WHEN UPPER(Area) IN ('UNITED STATES OF AMERICA', 'UNITED STATES', 'USA') THEN 'US'
-      WHEN UPPER(Area) = 'FRANCE' THEN 'FR'
-      ELSE NULL
-    END AS country,
-    CAST(Year AS INT64) AS year,
-    Value AS agri_value
-  FROM `splendid-binder-280014.rolnicze.rolnicze`
-  WHERE CAST(Year AS INT64) = 1962
-    AND Item = 'Wheat'
-    AND Element = 'Yield'
-)
-SELECT
-  w.country,
-  w.year,
-  w.month,
-  w.mean_temp_c,
-  w.total_prcp_mm,
-  w.temp_stddev_c,
-  a.agri_value
-FROM weather_monthly w
-LEFT JOIN agri_yearly a
-  ON w.country = a.country AND w.year = a.year;
+    mean_temp_c,
+    total_prcp_mm,
+    STDDEV_POP(mean_temp_c) OVER (PARTITION BY country, year) AS temp_stddev_c
+  FROM `splendid-binder-280014.rolnicze.v_weather_monthly_agg`
+  WHERE year = 1962 AND country IN ('US', 'FR')
+) m
+LEFT JOIN `splendid-binder-280014.rolnicze.v_agri_filtered` a
+  ON m.country = a.country AND m.year = a.year;
 
 -- 3.5
 -- Porównanie wariantów
@@ -283,12 +219,13 @@ SELECT
 FROM `splendid-binder-280014.rolnicze.v3_variant_b_final`;
 
 -- 3.6
--- Uproszczenie możliwe: można pominąć część zmiennych ekstremalnych,
--- jeśli celem jest szybki model bazowy (temp + opady + plon).
+-- Uproszczenie: można pominąć zmienne ekstremalne przy szybkim modelu bazowym (temp + opady + plon).
 
 -- 3.7
--- Wnioski: WITH poprawia czytelność i kontrolę etapów, a zapis etapów
--- jako widoków ułatwia testowanie, porównywanie wariantów i ponowne użycie.
+-- Wnioski: korzystanie z widoków z części 1 (filtrowanie i agregacja) zapobiega
+-- duplikacji logiki, ułatwia testowanie i porównania wariantów; wariant A jest
+-- najprostszy do interpretacji (roczne agregaty), wariant B daje lepszą
+-- rozdzielczość czasową (miesięczną) kosztem większej złożoności.
 
 
 -- CZESC 5
